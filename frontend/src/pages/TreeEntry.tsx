@@ -9,16 +9,16 @@ import {
   Input,
   InputNumber,
   Row,
-  Segmented,
   Select,
   Space,
   Statistic,
   Tag,
   Typography,
 } from 'antd';
-import { PlusOutlined } from '@ant-design/icons';
+import { CopyOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons';
 import { usePlotStore } from '../stores/plotStore';
 import { useTreeStore } from '../stores/treeStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import { useTreeStats } from '../hooks/useTreeStats';
 import TreeTable from '../components/common/TreeTable';
 import RoundTag from '../components/common/RoundTag';
@@ -41,18 +41,34 @@ export default function TreeEntry() {
   const trees = useTreeStore((s) => s.items);
   const addTree = useTreeStore((s) => s.add);
   const updateTree = useTreeStore((s) => s.update);
+  const archivesAll = useArchiveStore((s) => s.items);
+  const busy = useArchiveStore((s) => s.busy);
+  const publishDraft = useArchiveStore((s) => s.publishDraft);
+  const startRevision = useArchiveStore((s) => s.startRevision);
 
-  const rounds = useMemo(
-    () => Array.from(new Set(trees.filter((t) => t.plotId === id).map((t) => t.round))).sort((a, b) => a - b),
-    [trees, id],
+  const archives = useMemo(
+    () => archivesAll.filter((a) => a.plotId === id).sort((a, b) => a.round - b.round),
+    [archivesAll, id],
   );
+  const rounds = archives.map((a) => a.round);
+
   const [round, setRound] = useState(plot?.surveyRound ?? 1);
   useEffect(() => {
     if (plot) setRound(plot.surveyRound);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plot?.id]);
 
   const stats = useTreeStats(id, round);
-  const peers = trees.filter((t) => t.plotId === id);
+  const archive = archives.find((a) => a.round === round);
+  const readonly = archive?.status === 'published';
+  // 已发布期的同批参考取冻结快照；草稿期取该样地实时工作行
+  const peers = useMemo(
+    () =>
+      readonly && archive
+        ? archive.trees
+        : trees.filter((t) => t.plotId === id),
+    [readonly, archive, trees, id],
+  );
 
   const [speciesFilter, setSpeciesFilter] = useState('all');
   const [form, setForm] = useState<TreeRecordDraft>({
@@ -79,7 +95,7 @@ export default function TreeEntry() {
 
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast(''), 2400);
+    const timer = window.setTimeout(() => setToast(''), 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -89,6 +105,10 @@ export default function TreeEntry() {
   );
 
   const submit = async () => {
+    if (readonly) {
+      setError('该期已发布归档，请从该期生成修订期后再改');
+      return;
+    }
     if (!form.treeNo.trim()) {
       setError('树号必填');
       return;
@@ -101,10 +121,14 @@ export default function TreeEntry() {
       setError(`第 ${round} 期已存在树号 ${form.treeNo.trim()}`);
       return;
     }
-    await addTree({ ...form, treeNo: form.treeNo.trim(), species: form.species.trim(), round });
-    setError('');
-    setToast(`已录入第 ${round} 期样木 ${form.treeNo.trim()}（${diameterClassLabel(form.dbhCm)} cm 径阶）`);
-    setForm({ ...form, treeNo: '', dbhCm: 10, heightM: 8, remark: '' });
+    try {
+      await addTree({ ...form, treeNo: form.treeNo.trim(), species: form.species.trim(), round });
+      setError('');
+      setToast(`已录入第 ${round} 期样木 ${form.treeNo.trim()}（${diameterClassLabel(form.dbhCm)} cm 径阶）`);
+      setForm({ ...form, treeNo: '', dbhCm: 10, heightM: 8, remark: '' });
+    } catch (e) {
+      setError((e as Error).message);
+    }
   };
 
   if (!plot) {
@@ -122,15 +146,19 @@ export default function TreeEntry() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           样木录入 · {plot.plotNo}
         </Typography.Title>
-        <RoundTag round={round} locked={plot.locked} />
+        <RoundTag round={round} locked={archive?.locked ?? plot.locked} archive={archive} />
         <Tag>{plot.forestType}</Tag>
         <Tag color="green">优势树种 {plot.dominantSpecies}</Tag>
+        {archive?.sourceRound ? <Tag color="purple">修订自第 {archive.sourceRound} 期</Tag> : null}
         <div style={{ flex: 1 }} />
         <Button type="link">
           <Link to={`/plots/${plot.id}/regen`}>更新与灌木</Link>
         </Button>
         <Button type="link">
           <Link to={`/plots/${plot.id}/recheck`}>复查比对</Link>
+        </Button>
+        <Button type="link">
+          <Link to={`/plots/${plot.id}/archives`}>期次档案</Link>
         </Button>
         <Button type="link">
           <Link to={`/summary/${plot.id}`}>林分汇总</Link>
@@ -143,12 +171,15 @@ export default function TreeEntry() {
       <Card size="small">
         <Space wrap size={12}>
           <span>
-            录入期次
+            查看/录入期次
             <Select
-              style={{ width: 130, marginLeft: 6 }}
+              style={{ width: 150, marginLeft: 6 }}
               value={round}
               onChange={setRound}
-              options={(rounds.length ? rounds : [1]).map((r) => ({ value: r, label: `第 ${r} 期` }))}
+              options={(rounds.length ? rounds : [plot.surveyRound]).map((r) => ({
+                value: r,
+                label: `第 ${r} 期`,
+              }))}
             />
           </span>
           <span>
@@ -166,16 +197,62 @@ export default function TreeEntry() {
           <Typography.Text type="secondary">
             已录 {stats.count} 株（活立木 {stats.aliveCount} 株） · 筛选显示 {rows.length} 株
           </Typography.Text>
+          <div style={{ flex: 1 }} />
+          {readonly ? (
+            <Space>
+              <Tag color="green">已发布冻结，数据只读</Tag>
+              <Button
+                size="small"
+                icon={<CopyOutlined />}
+                loading={!!busy[`rev:${id}:${round}`]}
+                onClick={async () => {
+                  try {
+                    const created = await startRevision(id, round);
+                    setRound(created.round);
+                    setToast(`已生成第 ${created.round} 期修订草稿，原第 ${round} 期快照不变`);
+                  } catch (e) {
+                    setError((e as Error).message);
+                  }
+                }}
+              >
+                从本期生成修订期
+              </Button>
+            </Space>
+          ) : (
+            <Button
+              type="primary"
+              ghost
+              icon={<SendOutlined />}
+              loading={!!busy[`pub:${id}:${round}`]}
+              onClick={async () => {
+                try {
+                  await publishDraft(id, round);
+                  setToast(`第 ${round} 期已发布归档，之后修改需另开修订期`);
+                } catch (e) {
+                  setError((e as Error).message);
+                }
+              }}
+            >
+              发布本期
+            </Button>
+          )}
         </Space>
       </Card>
 
       {toast ? <Alert type="success" showIcon message={toast} closable onClose={() => setToast('')} /> : null}
       {error ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}
+      {readonly ? (
+        <Alert
+          type="info"
+          showIcon
+          message={`第 ${round} 期已发布归档，展示的是发布时冻结的快照；如需更正请使用「从本期生成修订期」。`}
+        />
+      ) : null}
 
       <Row gutter={12}>
         <Col span={12}>
           <Card size="small" title={`第 ${round} 期快速录入`}>
-            <Space wrap size={8}>
+            <Space wrap size={8} style={{ opacity: readonly ? 0.5 : 1, pointerEvents: readonly ? 'none' : 'auto' }}>
               <Input
                 style={{ width: 110 }}
                 placeholder="树号"
@@ -312,14 +389,22 @@ export default function TreeEntry() {
         </Col>
       </Row>
 
-      <Card size="small" title={`第 ${round} 期样木清单（${rows.length} 株，可点胸径单元格直接修改）`}>
+      <Card size="small" title={`第 ${round} 期样木清单（${rows.length} 株${readonly ? '，只读快照' : '，可点胸径单元格直接修改'}）`}>
         <TreeTable
           items={rows}
           peers={peers}
-          onDbhChange={async (treeId, dbhCm) => {
-            await updateTree(treeId, { dbhCm });
-            setToast('胸径已更新，径阶与断面积同步重算');
-          }}
+          onDbhChange={
+            readonly
+              ? undefined
+              : async (treeId, dbhCm) => {
+                  try {
+                    await updateTree(treeId, { dbhCm });
+                    setToast('胸径已更新，径阶与断面积同步重算（仅影响当前草稿）');
+                  } catch (e) {
+                    setError((e as Error).message);
+                  }
+                }
+          }
         />
       </Card>
     </Space>

@@ -82,7 +82,7 @@ export function formHeight(tree: TreeRecord): number {
 }
 
 /** 郁闭度换算：由冠幅合计 / 样地面积，封顶 1 */
-export function canopyFromCrown(trees: TreeRecord[], plot: Plot): number {
+export function canopyFromCrown(trees: TreeRecord[], plot: Pick<Plot, 'area'>): number {
   if (plot.area <= 0) return 0;
   const crownArea = trees
     .filter((t) => t.status === '活立木')
@@ -91,7 +91,7 @@ export function canopyFromCrown(trees: TreeRecord[], plot: Plot): number {
 }
 
 /** 更新密度（株/hm²） */
-export function regenDensity(rows: RegenShrub[], plot: Plot, layer?: RegenShrub['layer']): number {
+export function regenDensity(rows: RegenShrub[], plot: Pick<Plot, 'area'>, layer?: RegenShrub['layer']): number {
   const list = layer ? rows.filter((r) => r.layer === layer) : rows;
   const total = list.reduce((s, r) => s + r.count, 0);
   return perHectareCount(total, plot.area);

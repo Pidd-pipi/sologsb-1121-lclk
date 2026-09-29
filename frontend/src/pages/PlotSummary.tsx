@@ -7,6 +7,7 @@ import {
   Col,
   Descriptions,
   Row,
+  Select,
   Space,
   Statistic,
   Table,
@@ -18,13 +19,14 @@ import { CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import { usePlotStore } from '../stores/plotStore';
 import { useRegenStore } from '../stores/regenStore';
 import { useTreeStore } from '../stores/treeStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import { useTreeStats } from '../hooks/useTreeStats';
 import RoundTag from '../components/common/RoundTag';
 import PlotCard from '../components/common/PlotCard';
 import { canopyFromCrown, formHeight, heightClassStats } from '../utils/forestCalc';
+import { regensOfRound } from '../utils/roundData';
+import type { PlotSnapshot } from '../types/archive';
 import type { TreeRecord } from '../types/tree';
-
-type Columns = NonNullable<TableProps<TreeRecord>['columns']>;
 
 interface SpeciesRow {
   key: string;
@@ -34,13 +36,28 @@ interface SpeciesRow {
   meanHeight: number;
 }
 
-/** /summary/:plotId 林分因子汇总，可导出调查记录文本 */
+/** /summary/:plotId 林分因子汇总，可导出调查记录文本；已发布期读冻结快照 */
 export default function PlotSummary() {
   const { plotId = '' } = useParams();
   const plot = usePlotStore((s) => s.items.find((p) => p.id === plotId));
   const trees = useTreeStore((s) => s.items);
   const regens = useRegenStore((s) => s.items);
-  const stats = useTreeStats(plotId);
+  const archivesAll = useArchiveStore((s) => s.items);
+
+  const archives = useMemo(
+    () => archivesAll.filter((a) => a.plotId === plotId).sort((a, b) => a.round - b.round),
+    [archivesAll, plotId],
+  );
+  const rounds = archives.map((a) => a.round);
+
+  const [round, setRound] = useState(plot?.surveyRound ?? 1);
+  useEffect(() => {
+    if (plot) setRound(plot.surveyRound);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plot?.id]);
+
+  const archive = archives.find((a) => a.round === round);
+  const stats = useTreeStats(plotId, round);
 
   const [toast, setToast] = useState('');
 
@@ -50,9 +67,11 @@ export default function PlotSummary() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  // 已发布期：面积/元信息与更新层均取冻结快照
+  const meta: PlotSnapshot | undefined = archive?.status === 'published' ? archive.plotSnapshot : plot;
   const plotRegens = useMemo(
-    () => regens.filter((r) => r.plotId === plotId && r.round === (plot?.surveyRound ?? 1)),
-    [regens, plotId, plot?.surveyRound],
+    () => regensOfRound(archivesAll, regens, plotId, round),
+    [archivesAll, regens, plotId, round],
   );
 
   const speciesRows = useMemo(() => {
@@ -89,22 +108,24 @@ export default function PlotSummary() {
   ];
 
   const report = useMemo(() => {
-    if (!plot) return '';
+    if (!meta) return '';
     const lines: string[] = [];
     lines.push('森林样地调查记录');
-    lines.push(`样地号：${plot.plotNo}`);
-    lines.push(`地点：${plot.locality}（${plot.lng}, ${plot.lat}）`);
-    lines.push(`形状/面积：${plot.shape} / ${plot.area} m²`);
-    lines.push(`海拔：${plot.elevation} m；坡度 ${plot.slope}°；坡向 ${plot.aspect}`);
-    lines.push(`林型：${plot.forestType}；优势树种：${plot.dominantSpecies}`);
-    lines.push(`复查期次：第 ${plot.surveyRound} 期；调查时间：${new Date(plot.surveyedAt).toLocaleDateString('zh-CN')}`);
-    lines.push(`调查组：${plot.crew}`);
+    lines.push(`样地号：${meta.plotNo}`);
+    lines.push(`地点：${meta.locality}（${meta.lng}, ${meta.lat}）`);
+    lines.push(`形状/面积：${meta.shape} / ${meta.area} m²`);
+    lines.push(`海拔：${meta.elevation} m；坡度 ${meta.slope}°；坡向 ${meta.aspect}`);
+    lines.push(`林型：${meta.forestType}；优势树种：${meta.dominantSpecies}`);
+    lines.push(
+      `复查期次：第 ${round} 期${archive?.sourceRound ? `（修订自第 ${archive.sourceRound} 期）` : ''}；调查时间：${new Date(meta.surveyedAt).toLocaleDateString('zh-CN')}`,
+    );
+    lines.push(`调查组：${meta.crew}`);
     lines.push('');
     lines.push(`每公顷株数：${stats.perHa} 株/hm²`);
     lines.push(`平均胸径：${stats.meanDbh} cm`);
     lines.push(`平均树高：${stats.meanHeight} m`);
     lines.push(`断面积合计：${stats.basalArea} m²（${stats.basalAreaPerHa} m²/hm²）`);
-    lines.push(`郁闭度（录入）：${plot.canopyDensity}；按冠幅折算：${canopyFromCrown(stats.trees, plot)}`);
+    lines.push(`郁闭度（录入）：${meta.canopyDensity}；按冠幅折算：${canopyFromCrown(stats.trees, meta)}`);
     lines.push(`更新苗密度：${stats.regenPerHa} 株/hm²；灌木密度：${stats.shrubPerHa} 株/hm²`);
     lines.push('');
     lines.push('径阶分布：' + stats.diameterDist.map((d) => `${d.label}cm=${d.count}`).join('，'));
@@ -115,9 +136,11 @@ export default function PlotSummary() {
       lines.push(`  ${r.species}：${r.count} 株，平均胸径 ${r.meanDbh} cm，平均树高 ${r.meanHeight} m`);
     });
     lines.push('');
-    lines.push(`导出时间：${new Date().toLocaleString('zh-CN')}`);
+    lines.push(
+      `导出时间：${new Date().toLocaleString('zh-CN')}（${archive?.status === 'published' ? '数据来自已发布冻结快照' : '数据来自未发布草稿'}）`,
+    );
     return lines.join('\n');
-  }, [plot, stats, plotRegens, speciesRows]);
+  }, [meta, round, archive, stats, plotRegens, speciesRows]);
 
   if (!plot) {
     return (
@@ -134,8 +157,18 @@ export default function PlotSummary() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           林分因子汇总 · {plot.plotNo}
         </Typography.Title>
-        <RoundTag round={plot.surveyRound} locked={plot.locked} />
+        <RoundTag round={round} locked={archive?.locked ?? plot.locked} archive={archive} />
+        {archive?.sourceRound ? <Tag color="purple">修订自第 {archive.sourceRound} 期</Tag> : null}
         <Tag color="green">{plot.forestType}</Tag>
+        <Select
+          style={{ width: 150, marginLeft: 8 }}
+          value={round}
+          onChange={setRound}
+          options={(rounds.length ? rounds : [plot.surveyRound]).map((r) => ({
+            value: r,
+            label: `第 ${r} 期`,
+          }))}
+        />
         <div style={{ flex: 1 }} />
         <Button type="link">
           <Link to={`/plots/${plot.id}/trees`}>样木录入</Link>
@@ -146,13 +179,21 @@ export default function PlotSummary() {
         <Button type="link">
           <Link to={`/plots/${plot.id}/recheck`}>复查比对</Link>
         </Button>
+        <Button type="link">
+          <Link to={`/plots/${plot.id}/archives`}>期次档案</Link>
+        </Button>
       </Space>
 
       {toast ? <Alert type="success" showIcon message={toast} closable onClose={() => setToast('')} /> : null}
+      {archive?.status === 'published' ? (
+        <Alert type="info" showIcon message={`当前展示第 ${round} 期发布时冻结的快照数据，之后的修改不会影响它。`} />
+      ) : (
+        <Alert type="warning" showIcon message={`第 ${round} 期尚未发布，当前为草稿数据，发布后才会冻结归档。`} />
+      )}
 
       <Row gutter={12}>
         <Col span={8}>
-          <PlotCard plot={plot} treeCount={stats.count} />
+          <PlotCard plot={plot} archive={archive} treeCount={stats.count} />
         </Col>
         <Col span={16}>
           <Row gutter={[12, 12]}>
@@ -183,7 +224,7 @@ export default function PlotSummary() {
             </Col>
             <Col span={8}>
               <Card size="small">
-                <Statistic title="郁闭度（冠幅折算）" value={canopyFromCrown(stats.trees, plot)} precision={3} />
+                <Statistic title="郁闭度（冠幅折算）" value={canopyFromCrown(stats.trees, meta ?? plot)} precision={3} />
               </Card>
             </Col>
             <Col span={12}>
@@ -263,7 +304,7 @@ export default function PlotSummary() {
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `调查记录_${plot.plotNo}.txt`;
+                a.download = `调查记录_${plot.plotNo}_第${round}期.txt`;
                 a.click();
                 URL.revokeObjectURL(url);
                 setToast('调查记录已导出为 txt');

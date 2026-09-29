@@ -22,8 +22,10 @@ import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { usePlotStore } from '../stores/plotStore';
 import { useTreeStore } from '../stores/treeStore';
 import { useRegenStore } from '../stores/regenStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import { usePlotFilter } from '../hooks/usePlotFilter';
 import PlotCard from '../components/common/PlotCard';
+import { treesOfRound } from '../utils/roundData';
 import { FOREST_TYPES, PLOT_SHAPES, type PlotDraft, type PlotShape } from '../types/plot';
 
 const EMPTY: PlotDraft = {
@@ -53,6 +55,7 @@ export default function PlotList() {
   const toggleLock = usePlotStore((s) => s.toggleLock);
   const trees = useTreeStore((s) => s.items);
   const regens = useRegenStore((s) => s.items);
+  const archives = useArchiveStore((s) => s.items);
   const { filters, patch, reset, result, options } = usePlotFilter();
 
   const [open, setOpen] = useState(false);
@@ -201,7 +204,8 @@ export default function PlotList() {
             <Col key={plot.id} xs={24} md={12} xl={8}>
               <PlotCard
                 plot={plot}
-                treeCount={trees.filter((t) => t.plotId === plot.id && t.round === plot.surveyRound).length}
+                archive={archives.find((a) => a.plotId === plot.id && a.round === plot.surveyRound)}
+                treeCount={treesOfRound(archives, trees, plot.id, plot.surveyRound).length}
                 footer={
                   <Space wrap size={4}>
                     <Button size="small" type="link" onClick={() => navigate(`/plots/${plot.id}/trees`)}>
@@ -212,6 +216,9 @@ export default function PlotList() {
                     </Button>
                     <Button size="small" type="link" onClick={() => navigate(`/plots/${plot.id}/recheck`)}>
                       复查比对
+                    </Button>
+                    <Button size="small" type="link" onClick={() => navigate(`/plots/${plot.id}/archives`)}>
+                      期次档案
                     </Button>
                     <Button size="small" type="link" onClick={() => navigate(`/summary/${plot.id}`)}>
                       林分汇总

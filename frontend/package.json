@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview --port 5173"
+    "preview": "vite preview --port 5173",
+    "verify:archives": "tsx scripts/verify-archives.ts",
+    "verify:migration": "tsx scripts/verify-migration.ts",
+    "verify:concurrent": "tsx scripts/verify-concurrent.ts",
+    "verify": "tsx scripts/verify-archives.ts && tsx scripts/verify-migration.ts && tsx scripts/verify-concurrent.ts"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.1",
@@ -21,6 +25,8 @@
     "@types/react": "^18.3.10",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "fake-indexeddb": "^6.0.0",
+    "tsx": "^4.19.1",
     "typescript": "^5.6.2",
     "vite": "^5.4.8"
   }

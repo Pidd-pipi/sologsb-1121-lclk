@@ -16,9 +16,10 @@ import {
   Typography,
   type TableProps,
 } from 'antd';
-import { PlusOutlined } from '@ant-design/icons';
+import { CopyOutlined, PlusOutlined } from '@ant-design/icons';
 import { usePlotStore } from '../stores/plotStore';
 import { useRegenStore } from '../stores/regenStore';
+import { useArchiveStore } from '../stores/archiveStore';
 import RoundTag from '../components/common/RoundTag';
 import {
   AGE_GROUPS,
@@ -33,6 +34,7 @@ import {
 } from '../types/regen';
 import { heightClassStats } from '../utils/forestCalc';
 import { perHectareCount } from '../utils/forestCalc';
+import { regensOfRound } from '../utils/roundData';
 
 type Columns = NonNullable<TableProps<RegenShrub>['columns']>;
 
@@ -43,10 +45,31 @@ export default function RegenView() {
   const regens = useRegenStore((s) => s.items);
   const addRegen = useRegenStore((s) => s.add);
   const removeRegen = useRegenStore((s) => s.remove);
+  const archivesAll = useArchiveStore((s) => s.items);
+  const busy = useArchiveStore((s) => s.busy);
+  const startRevision = useArchiveStore((s) => s.startRevision);
+
+  const archives = useMemo(
+    () => archivesAll.filter((a) => a.plotId === id).sort((a, b) => a.round - b.round),
+    [archivesAll, id],
+  );
+  const rounds = archives.map((a) => a.round);
+
+  const [round, setRound] = useState(plot?.surveyRound ?? 1);
+  useEffect(() => {
+    if (plot) setRound(plot.surveyRound);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plot?.id]);
+
+  const archive = archives.find((a) => a.round === round);
+  const readonly = archive?.status === 'published';
 
   const rows = useMemo(
-    () => regens.filter((r) => r.plotId === id).sort((a, b) => a.layer.localeCompare(b.layer) || b.heightCm - a.heightCm),
-    [regens, id],
+    () =>
+      regensOfRound(archivesAll, regens, id, round).sort(
+        (a, b) => a.layer.localeCompare(b.layer) || b.heightCm - a.heightCm,
+      ),
+    [archivesAll, regens, id, round],
   );
 
   const [layerFilter, setLayerFilter] = useState<RegenLayer | 'all'>('all');
@@ -59,14 +82,14 @@ export default function RegenView() {
     ageGroup: '2 年生',
     distribution: '均匀',
     browseDamage: '无',
-    round: plot?.surveyRound ?? 1,
+    round,
   });
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
 
   useEffect(() => {
-    setForm((prev) => ({ ...prev, plotId: id, round: plot?.surveyRound ?? 1 }));
-  }, [id, plot?.surveyRound]);
+    setForm((prev) => ({ ...prev, plotId: id, round }));
+  }, [id, round]);
 
   useEffect(() => {
     if (!toast) return;
@@ -110,11 +133,24 @@ export default function RegenView() {
     {
       title: '操作',
       width: 90,
-      render: (_: unknown, row: RegenShrub) => (
-        <Button size="small" danger onClick={() => removeRegen(row.id)}>
-          删除
-        </Button>
-      ),
+      render: (_: unknown, row: RegenShrub) =>
+        readonly ? (
+          <Tag>只读</Tag>
+        ) : (
+          <Button
+            size="small"
+            danger
+            onClick={async () => {
+              try {
+                await removeRegen(row.id);
+              } catch (e) {
+                setError((e as Error).message);
+              }
+            }}
+          >
+            删除
+          </Button>
+        ),
     },
   ];
 
@@ -133,8 +169,9 @@ export default function RegenView() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           更新苗与灌木层 · {plot.plotNo}
         </Typography.Title>
-        <RoundTag round={plot.surveyRound} locked={plot.locked} />
+        <RoundTag round={round} locked={archive?.locked ?? plot.locked} archive={archive} />
         <Tag>样地面积 {plot.area} m²</Tag>
+        {archive?.sourceRound ? <Tag color="purple">修订自第 {archive.sourceRound} 期</Tag> : null}
         <div style={{ flex: 1 }} />
         <Button type="link">
           <Link to={`/plots/${plot.id}/trees`}>样木录入</Link>
@@ -143,15 +180,60 @@ export default function RegenView() {
           <Link to={`/plots/${plot.id}/recheck`}>复查比对</Link>
         </Button>
         <Button type="link">
+          <Link to={`/plots/${plot.id}/archives`}>期次档案</Link>
+        </Button>
+        <Button type="link">
           <Link to={`/summary/${plot.id}`}>林分汇总</Link>
         </Button>
       </Space>
 
+      <Card size="small">
+        <Space wrap size={12}>
+          <span>
+            查看/登记期次
+            <Select
+              style={{ width: 150, marginLeft: 6 }}
+              value={round}
+              onChange={setRound}
+              options={(rounds.length ? rounds : [plot.surveyRound]).map((r) => ({ value: r, label: `第 ${r} 期` }))}
+            />
+          </span>
+          {readonly ? (
+            <Space>
+              <Tag color="green">已发布冻结，数据只读</Tag>
+              <Button
+                size="small"
+                icon={<CopyOutlined />}
+                loading={!!busy[`rev:${id}:${round}`]}
+                onClick={async () => {
+                  try {
+                    const created = await startRevision(id, round);
+                    setRound(created.round);
+                    setToast(`已生成第 ${created.round} 期修订草稿，原第 ${round} 期快照不变`);
+                  } catch (e) {
+                    setError((e as Error).message);
+                  }
+                }}
+              >
+                从本期生成修订期
+              </Button>
+            </Space>
+          ) : null}
+        </Space>
+      </Card>
+
       {toast ? <Alert type="success" showIcon message={toast} closable onClose={() => setToast('')} /> : null}
       {error ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}
+      {readonly ? (
+        <Alert
+          type="info"
+          showIcon
+          message={`第 ${round} 期已发布归档，展示发布时冻结的更新层快照；如需更正请生成修订期。`}
+        />
+      ) : null}
 
-      <Card size="small" title="登记样方记录">
-        <Space wrap size={8}>
+      <Card size="small" title="登记样方记录" style={{ opacity: readonly ? 0.6 : 1 }}>
+        <Space wrap size={8} style={{ pointerEvents: readonly ? 'none' : 'auto' }}>
           <Select
             style={{ width: 110 }}
             value={form.layer}
@@ -210,10 +292,14 @@ export default function RegenView() {
                 setError('种类必填');
                 return;
               }
-              await addRegen({ ...form, species: form.species.trim() });
-              setError('');
-              setToast(`已登记 ${form.layer} · ${form.species.trim()}（${form.count} 株）`);
-              setForm({ ...form, species: '' });
+              try {
+                await addRegen({ ...form, species: form.species.trim(), round });
+                setError('');
+                setToast(`已登记 ${form.layer} · ${form.species.trim()}（${form.count} 株）`);
+                setForm({ ...form, species: '' });
+              } catch (e) {
+                setError((e as Error).message);
+              }
             }}
           >
             保存记录
@@ -272,12 +358,14 @@ export default function RegenView() {
         size="small"
         title="样方记录清单"
         extra={
-          <Select
-            style={{ width: 130 }}
-            value={layerFilter}
-            onChange={(v) => setLayerFilter(v as RegenLayer | 'all')}
-            options={[{ value: 'all', label: '全部层位' }, ...REGEN_LAYERS.map((l) => ({ value: l, label: l }))]}
-          />
+          <Space>
+            <Select
+              style={{ width: 130 }}
+              value={layerFilter}
+              onChange={(v) => setLayerFilter(v as RegenLayer | 'all')}
+              options={[{ value: 'all', label: '全部层位' }, ...REGEN_LAYERS.map((l) => ({ value: l, label: l }))]}
+            />
+          </Space>
         }
       >
         <Table<RegenShrub>

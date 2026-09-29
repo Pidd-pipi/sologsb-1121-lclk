@@ -1,18 +1,21 @@
 import type { ReactNode } from 'react';
-import { Card, Descriptions, Progress, Space, Typography } from 'antd';
+import { Card, Descriptions, Progress, Space, Tag, Typography } from 'antd';
 import { EnvironmentOutlined } from '@ant-design/icons';
 import type { Plot } from '../../types/plot';
+import type { RoundArchive } from '../../types/archive';
 import RoundTag from './RoundTag';
 
 export interface PlotCardProps {
   plot: Plot;
   treeCount?: number;
+  /** 当前期档案（用于草稿/已发布角标） */
+  archive?: RoundArchive;
   onOpen?: (id: string) => void;
   footer?: ReactNode;
 }
 
 /** 样地摘要卡（样地号、地点、面积、郁闭度、优势树种），被样地台账与汇总页消费 */
-export default function PlotCard({ plot, treeCount, onOpen, footer }: PlotCardProps) {
+export default function PlotCard({ plot, treeCount, archive, onOpen, footer }: PlotCardProps) {
   return (
     <Card
       size="small"
@@ -21,7 +24,8 @@ export default function PlotCard({ plot, treeCount, onOpen, footer }: PlotCardPr
       title={
         <Space size={6} wrap>
           <span data-testid={`plot-card-${plot.plotNo}`}>{plot.plotNo}</span>
-          <RoundTag round={plot.surveyRound} locked={plot.locked} />
+          <RoundTag round={plot.surveyRound} locked={plot.locked} archive={archive} />
+          {archive?.sourceRound ? <Tag color="purple">修订自第 {archive.sourceRound} 期</Tag> : null}
         </Space>
       }
     >
