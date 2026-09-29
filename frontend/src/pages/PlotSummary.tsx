@@ -16,15 +16,15 @@ import {
 } from 'antd';
 import { CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import { usePlotStore } from '../stores/plotStore';
-import { useRegenStore } from '../stores/regenStore';
-import { useTreeStore } from '../stores/treeStore';
 import { useTreeStats } from '../hooks/useTreeStats';
+import { useArchiveData, useReloadAfterRoundChange } from '../hooks/useArchiveData';
 import RoundTag from '../components/common/RoundTag';
 import PlotCard from '../components/common/PlotCard';
+import ArchiveTimeline from '../components/common/ArchiveTimeline';
+import SnapshotViewer from '../components/common/SnapshotViewer';
 import { canopyFromCrown, formHeight, heightClassStats } from '../utils/forestCalc';
 import type { TreeRecord } from '../types/tree';
-
-type Columns = NonNullable<TableProps<TreeRecord>['columns']>;
+import { roundArchiveLabel, type RoundArchive } from '../types/roundArchive';
 
 interface SpeciesRow {
   key: string;
@@ -34,15 +34,15 @@ interface SpeciesRow {
   meanHeight: number;
 }
 
-/** /summary/:plotId 林分因子汇总，可导出调查记录文本 */
+/** /summary/:plotId 林分因子汇总，取当前期（草稿或最近已发布快照），可导出调查记录文本 */
 export default function PlotSummary() {
   const { plotId = '' } = useParams();
   const plot = usePlotStore((s) => s.items.find((p) => p.id === plotId));
-  const trees = useTreeStore((s) => s.items);
-  const regens = useRegenStore((s) => s.items);
-  const stats = useTreeStats(plotId);
-
+  const { archives, current, trees, regens } = useArchiveData(plotId);
+  const stats = useTreeStats(plotId, current?.roundNo ?? 1, undefined, { trees, regens });
+  const reloadAfterRoundChange = useReloadAfterRoundChange();
   const [toast, setToast] = useState('');
+  const [snapshot, setSnapshot] = useState<RoundArchive | null>(null);
 
   useEffect(() => {
     if (!toast) return;
@@ -50,10 +50,7 @@ export default function PlotSummary() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const plotRegens = useMemo(
-    () => regens.filter((r) => r.plotId === plotId && r.round === (plot?.surveyRound ?? 1)),
-    [regens, plotId, plot?.surveyRound],
-  );
+  const plotRegens = regens;
 
   const speciesRows = useMemo(() => {
     const map = new Map<string, { species: string; count: number; dbh: number; height: number }>();
@@ -89,7 +86,7 @@ export default function PlotSummary() {
   ];
 
   const report = useMemo(() => {
-    if (!plot) return '';
+    if (!plot || !current) return '';
     const lines: string[] = [];
     lines.push('森林样地调查记录');
     lines.push(`样地号：${plot.plotNo}`);
@@ -97,7 +94,10 @@ export default function PlotSummary() {
     lines.push(`形状/面积：${plot.shape} / ${plot.area} m²`);
     lines.push(`海拔：${plot.elevation} m；坡度 ${plot.slope}°；坡向 ${plot.aspect}`);
     lines.push(`林型：${plot.forestType}；优势树种：${plot.dominantSpecies}`);
-    lines.push(`复查期次：第 ${plot.surveyRound} 期；调查时间：${new Date(plot.surveyedAt).toLocaleDateString('zh-CN')}`);
+    lines.push(
+      `期次档案：${roundArchiveLabel(current)}${current.sourceRoundId ? `（来源第 ${current.roundNo} 期原档案）` : ''}；` +
+        `调查时间：${new Date(plot.surveyedAt).toLocaleDateString('zh-CN')}`,
+    );
     lines.push(`调查组：${plot.crew}`);
     lines.push('');
     lines.push(`每公顷株数：${stats.perHa} 株/hm²`);
@@ -117,7 +117,7 @@ export default function PlotSummary() {
     lines.push('');
     lines.push(`导出时间：${new Date().toLocaleString('zh-CN')}`);
     return lines.join('\n');
-  }, [plot, stats, plotRegens, speciesRows]);
+  }, [plot, current, stats, plotRegens, speciesRows]);
 
   if (!plot) {
     return (
@@ -134,7 +134,14 @@ export default function PlotSummary() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           林分因子汇总 · {plot.plotNo}
         </Typography.Title>
-        <RoundTag round={plot.surveyRound} locked={plot.locked} />
+        {current ? (
+          <RoundTag
+            round={current.roundNo}
+            locked={current.locked}
+            revisionSeq={current.revisionSeq}
+            status={current.status}
+          />
+        ) : null}
         <Tag color="green">{plot.forestType}</Tag>
         <div style={{ flex: 1 }} />
         <Button type="link">
@@ -151,10 +158,21 @@ export default function PlotSummary() {
       {toast ? <Alert type="success" showIcon message={toast} closable onClose={() => setToast('')} /> : null}
 
       <Row gutter={12}>
-        <Col span={8}>
-          <PlotCard plot={plot} treeCount={stats.count} />
+        <Col span={7}>
+          <PlotCard plot={plot} treeCount={stats.count} archive={current} />
+          <div style={{ marginTop: 12 }}>
+            <ArchiveTimeline
+              plotId={plotId}
+              archives={archives}
+              currentId={current?.id}
+              onView={setSnapshot}
+              onChanged={() => {
+                void reloadAfterRoundChange(plotId);
+              }}
+            />
+          </div>
         </Col>
-        <Col span={16}>
+        <Col span={17}>
           <Row gutter={[12, 12]}>
             <Col span={8}>
               <Card size="small">
@@ -197,43 +215,43 @@ export default function PlotSummary() {
               </Card>
             </Col>
           </Row>
+
+          <Card size="small" title="径阶分布与高度级" style={{ marginTop: 12 }}>
+            <Space direction="vertical" size={6}>
+              <div>
+                {stats.diameterDist.map((d) => (
+                  <Tag key={d.label} color={d.count > 0 ? 'green' : 'default'}>
+                    {d.label} cm · {d.count}
+                  </Tag>
+                ))}
+              </div>
+              <div>
+                {heightClassStats(plotRegens).map((h) => (
+                  <Tag key={h.label} color={h.count > 0 ? 'cyan' : 'default'}>
+                    {h.label} · {h.count} 株
+                  </Tag>
+                ))}
+              </div>
+              <Descriptions size="small" column={3}>
+                <Descriptions.Item label="活立木">{stats.aliveCount} 株</Descriptions.Item>
+                <Descriptions.Item label="样木记录">{stats.count} 条</Descriptions.Item>
+                <Descriptions.Item label="样方记录">{plotRegens.length} 条</Descriptions.Item>
+              </Descriptions>
+            </Space>
+          </Card>
+
+          <Card size="small" title="分树种统计" style={{ marginTop: 12 }}>
+            <Table<SpeciesRow>
+              rowKey="key"
+              size="small"
+              columns={speciesColumns}
+              dataSource={speciesRows}
+              pagination={false}
+              locale={{ emptyText: '暂无活立木数据' }}
+            />
+          </Card>
         </Col>
       </Row>
-
-      <Card size="small" title="径阶分布与高度级">
-        <Space direction="vertical" size={6}>
-          <div>
-            {stats.diameterDist.map((d) => (
-              <Tag key={d.label} color={d.count > 0 ? 'green' : 'default'}>
-                {d.label} cm · {d.count} 株
-              </Tag>
-            ))}
-          </div>
-          <div>
-            {heightClassStats(plotRegens).map((h) => (
-              <Tag key={h.label} color={h.count > 0 ? 'cyan' : 'default'}>
-                {h.label} · {h.count} 株
-              </Tag>
-            ))}
-          </div>
-          <Descriptions size="small" column={3}>
-            <Descriptions.Item label="活立木">{stats.aliveCount} 株</Descriptions.Item>
-            <Descriptions.Item label="样木记录">{stats.count} 条</Descriptions.Item>
-            <Descriptions.Item label="样方记录">{plotRegens.length} 条</Descriptions.Item>
-          </Descriptions>
-        </Space>
-      </Card>
-
-      <Card size="small" title="分树种统计">
-        <Table<SpeciesRow>
-          rowKey="key"
-          size="small"
-          columns={speciesColumns}
-          dataSource={speciesRows}
-          pagination={false}
-          locale={{ emptyText: '暂无活立木数据' }}
-        />
-      </Card>
 
       <Card
         size="small"
@@ -278,6 +296,8 @@ export default function PlotSummary() {
           <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{report}</pre>
         </Typography.Paragraph>
       </Card>
+
+      <SnapshotViewer archive={snapshot} onClose={() => setSnapshot(null)} />
     </Space>
   );
 }

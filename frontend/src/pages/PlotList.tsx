@@ -18,13 +18,15 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { PlusOutlined, ReloadOutlined, CloudUploadOutlined, PlusCircleOutlined } from '@ant-design/icons';
 import { usePlotStore } from '../stores/plotStore';
 import { useTreeStore } from '../stores/treeStore';
 import { useRegenStore } from '../stores/regenStore';
+import { useRoundStore } from '../stores/roundStore';
 import { usePlotFilter } from '../hooks/usePlotFilter';
 import PlotCard from '../components/common/PlotCard';
 import { FOREST_TYPES, PLOT_SHAPES, type PlotDraft, type PlotShape } from '../types/plot';
+import { ArchiveConflictError, ArchiveLockedError, draftOf, latestPublishedOf } from '../types/roundArchive';
 
 const EMPTY: PlotDraft = {
   plotNo: '',
@@ -50,9 +52,16 @@ export default function PlotList() {
   const navigate = useNavigate();
   const plots = usePlotStore((s) => s.items);
   const addPlot = usePlotStore((s) => s.add);
-  const toggleLock = usePlotStore((s) => s.toggleLock);
   const trees = useTreeStore((s) => s.items);
   const regens = useRegenStore((s) => s.items);
+  const roundItems = useRoundStore((s) => s.items);
+  const startNextRound = useRoundStore((s) => s.startNextRound);
+  const publishRound = useRoundStore((s) => s.publish);
+  const toggleLockRound = useRoundStore((s) => s.toggleLock);
+  const loadRounds = useRoundStore((s) => s.load);
+  const loadTrees = useTreeStore((s) => s.load);
+  const loadRegens = useRegenStore((s) => s.load);
+  const syncPlot = usePlotStore((s) => s.syncFromArchives);
   const { filters, patch, reset, result, options } = usePlotFilter();
 
   const [open, setOpen] = useState(false);
@@ -86,10 +95,27 @@ export default function PlotList() {
       return;
     }
     const created = await addPlot({ ...draft, plotNo: draft.plotNo.trim(), surveyedAt: Date.now() });
+    await loadRounds();
     setOpen(false);
     setDraft(EMPTY);
     setError('');
-    setToast(`已建立样地「${created.plotNo}」`);
+    setToast(`已建立样地「${created.plotNo}」，并生成第 1 期草稿`);
+  };
+
+  const refreshAfterRound = async (plotId: string) => {
+    await Promise.all([loadRounds(), loadTrees(), loadRegens()]);
+    await syncPlot(plotId);
+  };
+
+  const handleRoundAction = async (plotId: string, action: () => Promise<unknown>, ok: string) => {
+    try {
+      await action();
+      await refreshAfterRound(plotId);
+      setToast(ok);
+    } catch (e) {
+      if (e instanceof ArchiveConflictError || e instanceof ArchiveLockedError) setError(e.message);
+      else setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   return (
@@ -197,11 +223,22 @@ export default function PlotList() {
         <Empty description="没有符合条件的样地" />
       ) : (
         <Row gutter={[12, 12]}>
-          {result.map((plot) => (
+          {result.map((plot) => {
+            const plotArchives = roundItems.filter((a) => a.plotId === plot.id);
+            const draftRound = draftOf(plotArchives);
+            const latest = latestPublishedOf(plotArchives);
+            const currentRound = draftRound ?? latest;
+            const currentTrees = currentRound
+              ? currentRound.snapshot
+                ? currentRound.snapshot.trees.length
+                : trees.filter((t) => t.roundId === currentRound.id).length
+              : 0;
+            return (
             <Col key={plot.id} xs={24} md={12} xl={8}>
               <PlotCard
                 plot={plot}
-                treeCount={trees.filter((t) => t.plotId === plot.id && t.round === plot.surveyRound).length}
+                treeCount={currentTrees}
+                archive={currentRound}
                 footer={
                   <Space wrap size={4}>
                     <Button size="small" type="link" onClick={() => navigate(`/plots/${plot.id}/trees`)}>
@@ -216,14 +253,69 @@ export default function PlotList() {
                     <Button size="small" type="link" onClick={() => navigate(`/summary/${plot.id}`)}>
                       林分汇总
                     </Button>
-                    <Button size="small" danger={!plot.locked} onClick={() => toggleLock(plot.id)}>
-                      {plot.locked ? '解锁往期' : '锁定往期'}
-                    </Button>
+                    {draftRound ? (
+                      <>
+                        <Button
+                          size="small"
+                          type="primary"
+                          ghost
+                          icon={<CloudUploadOutlined />}
+                          onClick={() =>
+                            handleRoundAction(plot.id, () => publishRound(draftRound.id), '期次已发布归档，快照已保存')
+                          }
+                        >
+                          发布草稿
+                        </Button>
+                        <Button
+                          size="small"
+                          danger={!draftRound.locked}
+                          onClick={() =>
+                            handleRoundAction(
+                              plot.id,
+                              () => toggleLockRound(draftRound.id),
+                              draftRound.locked ? '草稿已解锁' : '草稿已锁定',
+                            )
+                          }
+                        >
+                          {draftRound.locked ? '解锁草稿' : '锁定草稿'}
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <Button
+                          size="small"
+                          type="primary"
+                          ghost
+                          icon={<PlusCircleOutlined />}
+                          onClick={() =>
+                            handleRoundAction(plot.id, () => startNextRound(plot.id), '已按最近一次已发布快照开新一期草稿')
+                          }
+                        >
+                          开始下一期
+                        </Button>
+                        {latest ? (
+                          <Button
+                            size="small"
+                            danger={!latest.locked}
+                            onClick={() =>
+                              handleRoundAction(
+                                plot.id,
+                                () => toggleLockRound(latest.id),
+                                latest.locked ? '档案已解锁' : '档案已锁定',
+                              )
+                            }
+                          >
+                            {latest.locked ? '解锁往期' : '锁定往期'}
+                          </Button>
+                        ) : null}
+                      </>
+                    )}
                   </Space>
                 }
               />
             </Col>
-          ))}
+            );
+          })}
         </Row>
       )}
 

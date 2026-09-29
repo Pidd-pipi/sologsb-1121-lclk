@@ -5,7 +5,9 @@ import { ExperimentOutlined } from '@ant-design/icons';
 import { usePlotStore } from '../stores/plotStore';
 import { useTreeStore } from '../stores/treeStore';
 import { useRegenStore } from '../stores/regenStore';
+import { useRoundStore } from '../stores/roundStore';
 import { ensureSeedData, markDbVersion, readDbVersion } from '../utils/db';
+import { useCrossTabSync } from '../utils/dbSync';
 import PlotList from '../pages/PlotList';
 import TreeEntry from '../pages/TreeEntry';
 import RegenView from '../pages/RegenView';
@@ -79,22 +81,27 @@ function Shell() {
 /** 应用路由 + 本地数据引导（IndexedDB 迁移 + 示范数据） */
 export default function AppRouter() {
   const [ready, setReady] = useState(false);
+  useCrossTabSync();
   const loadPlots = usePlotStore((s) => s.load);
   const loadTrees = useTreeStore((s) => s.load);
   const loadRegens = useRegenStore((s) => s.load);
+  const loadRounds = useRoundStore((s) => s.load);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       await ensureSeedData();
       markDbVersion();
-      await Promise.all([loadPlots(), loadTrees(), loadRegens()]);
+      await Promise.all([loadPlots(), loadTrees(), loadRegens(), loadRounds()]);
+      // 旧库升级后，把当前档案的期号 / 锁定状态回写到样地（筛选与角标仍消费 plot 字段）
+      const plots = usePlotStore.getState().items;
+      await Promise.all(plots.map((p) => usePlotStore.getState().syncFromArchives(p.id)));
       if (alive) setReady(true);
     })();
     return () => {
       alive = false;
     };
-  }, [loadPlots, loadTrees, loadRegens]);
+  }, [loadPlots, loadTrees, loadRegens, loadRounds]);
 
   if (!ready) {
     return (

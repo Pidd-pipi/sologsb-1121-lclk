@@ -27,6 +27,8 @@ export interface RegenShrub {
   distribution: Distribution;
   browseDamage: BrowseDamage;
   round: number;
+  /** 所属期次档案 id */
+  roundId: string;
 }
 
 export type RegenShrubDraft = Omit<RegenShrub, 'id'>;

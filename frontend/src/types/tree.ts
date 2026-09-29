@@ -35,8 +35,10 @@ export interface TreeRecord {
   tiltDeg: number;
   /** 位置描述 */
   remark: string;
-  /** 所属复查期次 */
+  /** 所属期次（期号，保留用于展示与旧数据兼容） */
   round: number;
+  /** 所属期次档案 id（活动行都挂在某一期草稿/档案下） */
+  roundId: string;
   measuredAt: number;
 }
 

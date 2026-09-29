@@ -9,19 +9,21 @@ import {
   Input,
   InputNumber,
   Row,
-  Segmented,
   Select,
   Space,
   Statistic,
   Tag,
   Typography,
 } from 'antd';
-import { PlusOutlined } from '@ant-design/icons';
+import { PlusOutlined, ReadOutlined } from '@ant-design/icons';
 import { usePlotStore } from '../stores/plotStore';
 import { useTreeStore } from '../stores/treeStore';
 import { useTreeStats } from '../hooks/useTreeStats';
+import { useArchiveData, snapshotTrees, useReloadAfterRoundChange } from '../hooks/useArchiveData';
 import TreeTable from '../components/common/TreeTable';
 import RoundTag from '../components/common/RoundTag';
+import ArchiveTimeline from '../components/common/ArchiveTimeline';
+import SnapshotViewer from '../components/common/SnapshotViewer';
 import {
   HEALTH_CLASSES,
   TREE_ORIGINS,
@@ -31,28 +33,35 @@ import {
   type TreeStatus,
 } from '../types/tree';
 import { diameterClassLabel } from '../utils/forestCalc';
+import { ArchiveConflictError, ArchiveLockedError, roundArchiveLabel, type RoundArchive } from '../types/roundArchive';
 
 const SPECIES_POOL = ['红松', '紫椴', '蒙古栎', '色木槭', '水曲柳', '胡桃楸', '云杉', '白桦'];
 
-/** /plots/:id/trees 样木录入与清单：径阶分组快速录入、行内改胸径、树种联想 */
+/** /plots/:id/trees 样木录入与清单：按档案期次组织，已发布期只读，草稿可录可改 */
 export default function TreeEntry() {
   const { id = '' } = useParams();
   const plot = usePlotStore((s) => s.items.find((p) => p.id === id));
-  const trees = useTreeStore((s) => s.items);
   const addTree = useTreeStore((s) => s.add);
   const updateTree = useTreeStore((s) => s.update);
+  const reloadAfterRoundChange = useReloadAfterRoundChange();
+  const { archives, current, draft, trees } = useArchiveData(id);
 
-  const rounds = useMemo(
-    () => Array.from(new Set(trees.filter((t) => t.plotId === id).map((t) => t.round))).sort((a, b) => a - b),
-    [trees, id],
-  );
-  const [round, setRound] = useState(plot?.surveyRound ?? 1);
+  // 正在查看的档案 id（默认当前期；可切换到任意已发布快照只读查看）
+  const [viewingId, setViewingId] = useState<string | undefined>(undefined);
+  const [snapshot, setSnapshot] = useState<RoundArchive | null>(null);
   useEffect(() => {
-    if (plot) setRound(plot.surveyRound);
-  }, [plot?.id]);
+    setViewingId(current?.id);
+  }, [current?.id]);
+  const viewing = archives.find((a) => a.id === viewingId) ?? current;
 
-  const stats = useTreeStats(id, round);
-  const peers = trees.filter((t) => t.plotId === id);
+  const round = viewing?.roundNo ?? plot?.surveyRound ?? 1;
+  const viewingReadOnly = viewing ? viewing.status !== 'draft' : true;
+  const activeTrees = useMemo(
+    () => (viewing ? (viewing.status === 'draft' ? trees : snapshotTrees(viewing)) : []),
+    [viewing, trees],
+  );
+
+  const stats = useTreeStats(id, round, undefined, { trees: activeTrees });
 
   const [speciesFilter, setSpeciesFilter] = useState('all');
   const [form, setForm] = useState<TreeRecordDraft>({
@@ -69,13 +78,14 @@ export default function TreeEntry() {
     tiltDeg: 0,
     remark: '',
     round: 1,
+    roundId: '',
   });
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
 
   useEffect(() => {
-    setForm((prev) => ({ ...prev, plotId: id, round }));
-  }, [id, round]);
+    setForm((prev) => ({ ...prev, plotId: id, round: draft?.roundNo ?? round, roundId: draft?.id ?? '' }));
+  }, [id, draft?.id, draft?.roundNo, round]);
 
   useEffect(() => {
     if (!toast) return;
@@ -84,11 +94,25 @@ export default function TreeEntry() {
   }, [toast]);
 
   const rows = useMemo(
-    () => stats.trees.filter((t) => speciesFilter === 'all' || t.species === speciesFilter),
-    [stats.trees, speciesFilter],
+    () => activeTrees.filter((t) => speciesFilter === 'all' || t.species === speciesFilter),
+    [activeTrees, speciesFilter],
   );
 
+  const reportError = (e: unknown) => {
+    if (e instanceof ArchiveConflictError) {
+      setError('该期已被其他终端提交，数据可能已变化。请刷新页面后基于最新版本重试。');
+    } else if (e instanceof ArchiveLockedError) {
+      setError(e.message);
+    } else {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const submit = async () => {
+    if (!draft) {
+      setError('当前没有可录入的草稿期；请先「开始下一期」或从已发布期「以此期修订」');
+      return;
+    }
     if (!form.treeNo.trim()) {
       setError('树号必填');
       return;
@@ -97,14 +121,25 @@ export default function TreeEntry() {
       setError('树种必填');
       return;
     }
-    if (stats.trees.some((t) => t.treeNo === form.treeNo.trim())) {
-      setError(`第 ${round} 期已存在树号 ${form.treeNo.trim()}`);
+    const draftTrees = trees;
+    if (draftTrees.some((t) => t.treeNo === form.treeNo.trim())) {
+      setError(`第 ${draft.roundNo} 期已存在树号 ${form.treeNo.trim()}`);
       return;
     }
-    await addTree({ ...form, treeNo: form.treeNo.trim(), species: form.species.trim(), round });
-    setError('');
-    setToast(`已录入第 ${round} 期样木 ${form.treeNo.trim()}（${diameterClassLabel(form.dbhCm)} cm 径阶）`);
-    setForm({ ...form, treeNo: '', dbhCm: 10, heightM: 8, remark: '' });
+    try {
+      await addTree({
+        ...form,
+        treeNo: form.treeNo.trim(),
+        species: form.species.trim(),
+        round: draft.roundNo,
+        roundId: draft.id,
+      });
+      setError('');
+      setToast(`已录入${roundArchiveLabel(draft)}样木 ${form.treeNo.trim()}（${diameterClassLabel(form.dbhCm)} cm 径阶）`);
+      setForm((prev) => ({ ...prev, treeNo: '', dbhCm: 10, heightM: 8, remark: '' }));
+    } catch (e) {
+      reportError(e);
+    }
   };
 
   if (!plot) {
@@ -116,13 +151,23 @@ export default function TreeEntry() {
     );
   }
 
+  const editable = !!draft && viewing?.id === draft.id && !draft.locked;
+
   return (
     <Space direction="vertical" size={14} style={{ width: '100%' }}>
       <Space wrap align="center">
         <Typography.Title level={4} style={{ margin: 0 }}>
           样木录入 · {plot.plotNo}
         </Typography.Title>
-        <RoundTag round={round} locked={plot.locked} />
+        {viewing ? (
+          <RoundTag
+            round={viewing.roundNo}
+            locked={viewing.locked}
+            revisionSeq={viewing.revisionSeq}
+            status={viewing.status}
+            sourceRoundNo={viewing.roundNo}
+          />
+        ) : null}
         <Tag>{plot.forestType}</Tag>
         <Tag color="green">优势树种 {plot.dominantSpecies}</Tag>
         <div style={{ flex: 1 }} />
@@ -143,12 +188,15 @@ export default function TreeEntry() {
       <Card size="small">
         <Space wrap size={12}>
           <span>
-            录入期次
+            查看期次
             <Select
-              style={{ width: 130, marginLeft: 6 }}
-              value={round}
-              onChange={setRound}
-              options={(rounds.length ? rounds : [1]).map((r) => ({ value: r, label: `第 ${r} 期` }))}
+              style={{ width: 200, marginLeft: 6 }}
+              value={viewing?.id}
+              onChange={setViewingId}
+              options={archives
+                .slice()
+                .sort((a, b) => b.roundNo - a.roundNo || b.revisionSeq - a.revisionSeq)
+                .map((a) => ({ value: a.id, label: roundArchiveLabel(a) }))}
             />
           </span>
           <span>
@@ -159,13 +207,20 @@ export default function TreeEntry() {
               onChange={setSpeciesFilter}
               options={[
                 { value: 'all', label: '全部树种' },
-                ...Array.from(new Set(stats.trees.map((t) => t.species))).map((s) => ({ value: s, label: s })),
+                ...Array.from(new Set(activeTrees.map((t) => t.species))).map((s) => ({ value: s, label: s })),
               ]}
             />
           </span>
           <Typography.Text type="secondary">
-            已录 {stats.count} 株（活立木 {stats.aliveCount} 株） · 筛选显示 {rows.length} 株
+            已录 {activeTrees.length} 株 · 筛选显示 {rows.length} 株
           </Typography.Text>
+          {viewingReadOnly ? (
+            <Tag icon={<ReadOutlined />} color="default">
+              档案只读：修改请用「以此期修订」生成修订草稿
+            </Tag>
+          ) : draft?.locked ? (
+            <Tag color="orange">草稿已锁定，解锁后可录入</Tag>
+          ) : null}
         </Space>
       </Card>
 
@@ -173,155 +228,192 @@ export default function TreeEntry() {
       {error ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}
 
       <Row gutter={12}>
-        <Col span={12}>
-          <Card size="small" title={`第 ${round} 期快速录入`}>
-            <Space wrap size={8}>
-              <Input
-                style={{ width: 110 }}
-                placeholder="树号"
-                value={form.treeNo}
-                onChange={(e) => setForm({ ...form, treeNo: e.target.value })}
+        <Col span={14}>
+          <Card
+            size="small"
+            title={draft ? `${roundArchiveLabel(draft)}快速录入` : '当前没有可录入的草稿期'}
+          >
+            {editable ? (
+              <>
+                <Space wrap size={8}>
+                  <Input
+                    style={{ width: 110 }}
+                    placeholder="树号"
+                    value={form.treeNo}
+                    onChange={(e) => setForm({ ...form, treeNo: e.target.value })}
+                  />
+                  <AutoComplete
+                    style={{ width: 150 }}
+                    placeholder="树种（可联想）"
+                    value={form.species}
+                    options={SPECIES_POOL.map((s) => ({ value: s }))}
+                    onChange={(v) => setForm({ ...form, species: v })}
+                    filterOption={(input, option) => String(option?.value ?? '').includes(input)}
+                  />
+                  <span>
+                    胸径 cm
+                    <InputNumber
+                      style={{ width: 100, marginLeft: 4 }}
+                      min={0}
+                      max={200}
+                      step={0.1}
+                      value={form.dbhCm}
+                      onChange={(v) => setForm({ ...form, dbhCm: Number(v ?? 0) })}
+                    />
+                  </span>
+                  <span>
+                    树高 m
+                    <InputNumber
+                      style={{ width: 90, marginLeft: 4 }}
+                      min={0}
+                      max={60}
+                      step={0.1}
+                      value={form.heightM}
+                      onChange={(v) => setForm({ ...form, heightM: Number(v ?? 0) })}
+                    />
+                  </span>
+                  <span>
+                    枝下高 m
+                    <InputNumber
+                      style={{ width: 90, marginLeft: 4 }}
+                      min={0}
+                      max={40}
+                      step={0.1}
+                      value={form.underBranchH}
+                      onChange={(v) => setForm({ ...form, underBranchH: Number(v ?? 0) })}
+                    />
+                  </span>
+                  <span>
+                    冠幅 m
+                    <InputNumber
+                      style={{ width: 90, marginLeft: 4 }}
+                      min={0}
+                      max={30}
+                      step={0.1}
+                      value={form.crownWidth}
+                      onChange={(v) => setForm({ ...form, crownWidth: Number(v ?? 0) })}
+                    />
+                  </span>
+                  <Select
+                    style={{ width: 110 }}
+                    value={form.status}
+                    onChange={(v) => setForm({ ...form, status: v as TreeStatus })}
+                    options={TREE_STATUSES.map((s) => ({ value: s, label: s }))}
+                  />
+                  <Select
+                    style={{ width: 90 }}
+                    value={form.origin}
+                    onChange={(v) => setForm({ ...form, origin: v as TreeOrigin })}
+                    options={TREE_ORIGINS.map((s) => ({ value: s, label: s }))}
+                  />
+                  <Select
+                    style={{ width: 110 }}
+                    value={form.healthClass}
+                    onChange={(v) => setForm({ ...form, healthClass: v })}
+                    options={HEALTH_CLASSES.map((s) => ({ value: s, label: s }))}
+                  />
+                  <span>
+                    倾斜 °
+                    <InputNumber
+                      style={{ width: 90, marginLeft: 4 }}
+                      min={0}
+                      max={45}
+                      value={form.tiltDeg}
+                      onChange={(v) => setForm({ ...form, tiltDeg: Number(v ?? 0) })}
+                    />
+                  </span>
+                  <Input
+                    style={{ width: 220 }}
+                    placeholder="位置描述，如「样地西南 3m」"
+                    value={form.remark}
+                    onChange={(e) => setForm({ ...form, remark: e.target.value })}
+                  />
+                  <Button type="primary" icon={<PlusOutlined />} onClick={submit}>
+                    录入样木
+                  </Button>
+                </Space>
+                <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+                  当前待录径阶：{diameterClassLabel(form.dbhCm)} cm（按「6/8/12/16/20/24/28/32+」径阶自动归组）
+                </Typography.Paragraph>
+              </>
+            ) : (
+              <Alert
+                type="info"
+                showIcon
+                message="没有可编辑的草稿"
+                description={
+                  <span>
+                    在右侧期次档案中点「开始下一期」（以最近一次已发布快照为底），或对某份已发布档案点「以此期修订」。
+                    {draft?.locked ? ' 当前草稿处于锁定状态，点档案卡上的解锁即可继续录入。' : ''}
+                  </span>
+                }
               />
-              <AutoComplete
-                style={{ width: 150 }}
-                placeholder="树种（可联想）"
-                value={form.species}
-                options={SPECIES_POOL.map((s) => ({ value: s }))}
-                onChange={(v) => setForm({ ...form, species: v })}
-                filterOption={(input, option) => String(option?.value ?? '').includes(input)}
-              />
-              <span>
-                胸径 cm
-                <InputNumber
-                  style={{ width: 100, marginLeft: 4 }}
-                  min={0}
-                  max={200}
-                  step={0.1}
-                  value={form.dbhCm}
-                  onChange={(v) => setForm({ ...form, dbhCm: Number(v ?? 0) })}
-                />
-              </span>
-              <span>
-                树高 m
-                <InputNumber
-                  style={{ width: 90, marginLeft: 4 }}
-                  min={0}
-                  max={60}
-                  step={0.1}
-                  value={form.heightM}
-                  onChange={(v) => setForm({ ...form, heightM: Number(v ?? 0) })}
-                />
-              </span>
-              <span>
-                枝下高 m
-                <InputNumber
-                  style={{ width: 90, marginLeft: 4 }}
-                  min={0}
-                  max={40}
-                  step={0.1}
-                  value={form.underBranchH}
-                  onChange={(v) => setForm({ ...form, underBranchH: Number(v ?? 0) })}
-                />
-              </span>
-              <span>
-                冠幅 m
-                <InputNumber
-                  style={{ width: 90, marginLeft: 4 }}
-                  min={0}
-                  max={30}
-                  step={0.1}
-                  value={form.crownWidth}
-                  onChange={(v) => setForm({ ...form, crownWidth: Number(v ?? 0) })}
-                />
-              </span>
-              <Select
-                style={{ width: 110 }}
-                value={form.status}
-                onChange={(v) => setForm({ ...form, status: v as TreeStatus })}
-                options={TREE_STATUSES.map((s) => ({ value: s, label: s }))}
-              />
-              <Select
-                style={{ width: 90 }}
-                value={form.origin}
-                onChange={(v) => setForm({ ...form, origin: v as TreeOrigin })}
-                options={TREE_ORIGINS.map((s) => ({ value: s, label: s }))}
-              />
-              <Select
-                style={{ width: 110 }}
-                value={form.healthClass}
-                onChange={(v) => setForm({ ...form, healthClass: v })}
-                options={HEALTH_CLASSES.map((s) => ({ value: s, label: s }))}
-              />
-              <span>
-                倾斜 °
-                <InputNumber
-                  style={{ width: 90, marginLeft: 4 }}
-                  min={0}
-                  max={45}
-                  value={form.tiltDeg}
-                  onChange={(v) => setForm({ ...form, tiltDeg: Number(v ?? 0) })}
-                />
-              </span>
-              <Input
-                style={{ width: 220 }}
-                placeholder="位置描述，如「样地西南 3m」"
-                value={form.remark}
-                onChange={(e) => setForm({ ...form, remark: e.target.value })}
-              />
-              <Button type="primary" icon={<PlusOutlined />} onClick={submit}>
-                录入样木
-              </Button>
-            </Space>
-            <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-              当前待录径阶：{diameterClassLabel(form.dbhCm)} cm（按「6/8/12/16/20/24/28/32+」径阶自动归组）
-            </Typography.Paragraph>
+            )}
           </Card>
         </Col>
-        <Col span={12}>
-          <Card size="small" title="本期林分速览">
-            <Row gutter={8}>
-              <Col span={8}>
-                <Statistic title="每公顷株数" value={stats.perHa} suffix="株/hm²" />
-              </Col>
-              <Col span={8}>
-                <Statistic title="平均胸径" value={stats.meanDbh} precision={2} suffix="cm" />
-              </Col>
-              <Col span={8}>
-                <Statistic title="断面积" value={stats.basalArea} precision={4} suffix="m²" />
-              </Col>
-            </Row>
-            <Row gutter={8} style={{ marginTop: 8 }}>
-              <Col span={8}>
-                <Statistic title="平均树高" value={stats.meanHeight} precision={2} suffix="m" />
-              </Col>
-              <Col span={8}>
-                <Statistic title="每公顷断面积" value={stats.basalAreaPerHa} precision={3} suffix="m²/hm²" />
-              </Col>
-              <Col span={8}>
-                <Statistic title="更新密度" value={stats.regenPerHa} suffix="株/hm²" />
-              </Col>
-            </Row>
-            <div style={{ marginTop: 10 }}>
-              {stats.diameterDist.map((d) => (
-                <Tag key={d.label} color={d.count > 0 ? 'green' : 'default'}>
-                  {d.label} cm · {d.count}
-                </Tag>
-              ))}
-            </div>
-          </Card>
+        <Col span={10}>
+          <ArchiveTimeline
+            plotId={id}
+            archives={archives}
+            currentId={viewing?.id}
+            onView={setSnapshot}
+            onChanged={() => {
+              void reloadAfterRoundChange(id);
+            }}
+          />
         </Col>
       </Row>
 
-      <Card size="small" title={`第 ${round} 期样木清单（${rows.length} 株，可点胸径单元格直接修改）`}>
+      <Card size="small" title="本期林分速览">
+        <Row gutter={8}>
+          <Col span={4}>
+            <Statistic title="每公顷株数" value={stats.perHa} suffix="株/hm²" />
+          </Col>
+          <Col span={4}>
+            <Statistic title="平均胸径" value={stats.meanDbh} precision={2} suffix="cm" />
+          </Col>
+          <Col span={4}>
+            <Statistic title="断面积" value={stats.basalArea} precision={4} suffix="m²" />
+          </Col>
+          <Col span={4}>
+            <Statistic title="平均树高" value={stats.meanHeight} precision={2} suffix="m" />
+          </Col>
+          <Col span={4}>
+            <Statistic title="每公顷断面积" value={stats.basalAreaPerHa} precision={3} suffix="m²/hm²" />
+          </Col>
+          <Col span={4}>
+            <Statistic title="更新密度" value={stats.regenPerHa} suffix="株/hm²" />
+          </Col>
+        </Row>
+        <div style={{ marginTop: 10 }}>
+          {stats.diameterDist.map((d) => (
+            <Tag key={d.label} color={d.count > 0 ? 'green' : 'default'}>
+              {d.label} cm · {d.count}
+            </Tag>
+          ))}
+        </div>
+      </Card>
+
+      <Card size="small" title={`${viewing ? roundArchiveLabel(viewing) : ''}样木清单（${rows.length} 株）`}>
         <TreeTable
           items={rows}
-          peers={peers}
-          onDbhChange={async (treeId, dbhCm) => {
-            await updateTree(treeId, { dbhCm });
-            setToast('胸径已更新，径阶与断面积同步重算');
-          }}
+          peers={activeTrees}
+          onDbhChange={
+            editable
+              ? async (treeId, dbhCm) => {
+                  try {
+                    await updateTree(treeId, { dbhCm });
+                    setToast('胸径已更新，径阶与断面积同步重算');
+                  } catch (e) {
+                    reportError(e);
+                  }
+                }
+              : undefined
+          }
         />
       </Card>
+
+      <SnapshotViewer archive={snapshot} onClose={() => setSnapshot(null)} />
     </Space>
   );
 }

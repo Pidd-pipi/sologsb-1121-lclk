@@ -24,10 +24,12 @@ export interface RecheckDiff {
   statusChange: string;
   /** 无法匹配时的缺失原因 */
   missingReason: string;
+  /** 归属期次档案 id（保存在哪一期） */
+  roundId: string;
   generatedAt: number;
 }
 
-export type RecheckDiffDraft = Omit<RecheckDiff, 'id' | 'generatedAt'>;
+export type RecheckDiffDraft = Omit<RecheckDiff, 'id' | 'roundId' | 'generatedAt'>;
 
 /** 保留木生长率：生长量 / 上期胸径 */
 export function growthRate(diff: RecheckDiff): number {
